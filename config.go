@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"github.com/tidwall/jsonc"
 	"io"
 	"os"
@@ -91,7 +92,8 @@ type Config struct {
 
 type ServiceConfig struct {
 	Name                            string
-	ListenPort                      string
+	ListenPort                      string   // Port number to listen on
+	ListenAddresses                []string // List of specific IP addresses to listen on (e.g., "127.0.0.1", "::1"). Empty means all addresses.
 	ProxyTargetHost                 string
 	ProxyTargetPort                 string
 	Command                         string
@@ -169,10 +171,13 @@ func (sc *ServiceConfig) GetServiceUrlTemplate(defaultUrl *string) (*template.Te
 }
 
 type OpenAiApi struct {
-	ListenPort string
+	ListenPort     string   // Port number to listen on
+	ListenAddresses []string // List of specific IP addresses to listen on. Empty means all addresses.
 }
+
 type ManagementApi struct {
-	ListenPort string
+	ListenPort     string   // Port number to listen on
+	ListenAddresses []string // List of specific IP addresses to listen on. Empty means all addresses.
 }
 
 func loadConfig(filePath string) (Config, error) {
@@ -332,10 +337,74 @@ func validateConfig(cfg Config) error {
 		}
 	}
 
+	// Validate ListenAddresses for services
+	for i, svc := range cfg.Services {
+		nameOrIndex := serviceNameOrIndex(svc.Name, i)
+		for _, addr := range svc.ListenAddresses {
+			if err := validateIPAddress(addr); err != nil {
+				issues = append(issues,
+					fmt.Sprintf("service %s has invalid ListenAddress %q: %v", nameOrIndex, addr, err))
+			}
+		}
+	}
+
+	// Validate ListenAddresses for OpenAiApi
+	for _, addr := range cfg.OpenAiApi.ListenAddresses {
+		if err := validateIPAddress(addr); err != nil {
+			issues = append(issues,
+				fmt.Sprintf("OpenAiApi has invalid ListenAddress %q: %v", addr, err))
+		}
+	}
+
+	// Validate ListenAddresses for ManagementApi
+	for _, addr := range cfg.ManagementApi.ListenAddresses {
+		if err := validateIPAddress(addr); err != nil {
+			issues = append(issues,
+				fmt.Sprintf("ManagementApi has invalid ListenAddress %q: %v", addr, err))
+		}
+	}
+
 	if len(issues) > 0 {
 		return errors.New(" - " + joinStrings(issues, "\n - "))
 	}
 	return nil
+}
+
+// validateIPAddress validates that the given string is a valid IP address (IPv4 or IPv6)
+func validateIPAddress(addr string) error {
+	// Check if it's a valid IPv4 address
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return fmt.Errorf("invalid IP address")
+	}
+	return nil
+}
+
+// GetListenAddressesForService returns the list of addresses to listen on for a service.
+// If ListenAddresses is empty, returns nil to indicate all addresses should be used.
+func (sc *ServiceConfig) GetListenAddresses() []string {
+	if len(sc.ListenAddresses) == 0 {
+		return nil
+	}
+	return sc.ListenAddresses
+}
+
+// GetListenAddressesForOpenAiApi returns the list of addresses to listen on for the OpenAI API.
+// If ListenAddresses is empty, returns nil to indicate all addresses should be used.
+func (oai *OpenAiApi) GetListenAddresses() []string {
+	if len(oai.ListenAddresses) == 0 {
+		return nil
+	}
+	return oai.ListenAddresses
+}
+
+// GetListenAddressesForManagementApi returns the list of addresses to listen on for the Management API.
+// If ListenAddresses is empty, returns nil to indicate all addresses should be used.
+func (ma *ManagementApi) GetListenAddresses() []string {
+	if len(ma.ListenAddresses) == 0 {
+		return nil
+	}
+	return ma.ListenAddresses
 }
 
 // validateGoTemplate validates that the given string is a valid Go template

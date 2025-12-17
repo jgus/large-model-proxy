@@ -751,3 +751,241 @@ func TestStartupTimeoutMillisecondsValueIsParsed(t *testing.T) {
 		t.Fatalf("expected StartupTimeoutMilliseconds to be 1500, got %d", cfg.Services[0].StartupTimeoutMilliseconds)
 	}
 }
+
+func TestValidListenAddressesIPv4(t *testing.T) {
+	t.Parallel()
+	_, err := loadConfigFromString(t, `{
+		"ResourcesAvailable": { "RAM": 10000 },
+		"Services": [
+			{
+				"Name": "svcIPv4",
+				"ListenPort": "8080",
+				"ListenAddresses": ["127.0.0.1", "192.168.1.1"],
+				"Command": "/bin/echo"
+			}
+		]
+	}`)
+	if err != nil {
+		t.Fatalf("did not expect an error but got: %v", err)
+	}
+}
+
+func TestValidListenAddressesIPv6(t *testing.T) {
+	t.Parallel()
+	_, err := loadConfigFromString(t, `{
+		"ResourcesAvailable": { "RAM": 10000 },
+		"Services": [
+			{
+				"Name": "svcIPv6",
+				"ListenPort": "8080",
+				"ListenAddresses": ["::1", "fe80::1"],
+				"Command": "/bin/echo"
+			}
+		]
+	}`)
+	if err != nil {
+		t.Fatalf("did not expect an error but got: %v", err)
+	}
+}
+
+func TestValidListenAddressesMixed(t *testing.T) {
+	t.Parallel()
+	_, err := loadConfigFromString(t, `{
+		"ResourcesAvailable": { "RAM": 10000 },
+		"Services": [
+			{
+				"Name": "svcMixed",
+				"ListenPort": "8080",
+				"ListenAddresses": ["127.0.0.1", "::1"],
+				"Command": "/bin/echo"
+			}
+		]
+	}`)
+	if err != nil {
+		t.Fatalf("did not expect an error but got: %v", err)
+	}
+}
+
+func TestValidEmptyListenAddresses(t *testing.T) {
+	t.Parallel()
+	_, err := loadConfigFromString(t, `{
+		"ResourcesAvailable": { "RAM": 10000 },
+		"Services": [
+			{
+				"Name": "svcEmpty",
+				"ListenPort": "8080",
+				"ListenAddresses": [],
+				"Command": "/bin/echo"
+			}
+		]
+	}`)
+	if err != nil {
+		t.Fatalf("did not expect an error but got: %v", err)
+	}
+}
+
+func TestInvalidListenAddressesBadIPv4(t *testing.T) {
+	t.Parallel()
+	_, err := loadConfigFromString(t, `{
+		"ResourcesAvailable": { "RAM": 10000 },
+		"Services": [
+			{
+				"Name": "svcBadIPv4",
+				"ListenPort": "8080",
+				"ListenAddresses": ["127.0.0.256", "192.168.1.1"],
+				"Command": "/bin/echo"
+			}
+		]
+	}`)
+	checkExpectedErrorMessages(t, err, []string{
+		"service \"svcBadIPv4\" has invalid ListenAddress \"127.0.0.256\"",
+		"invalid IP address",
+	})
+}
+
+func TestInvalidListenAddressesBadIPv6(t *testing.T) {
+	t.Parallel()
+	_, err := loadConfigFromString(t, `{
+		"ResourcesAvailable": { "RAM": 10000 },
+		"Services": [
+			{
+				"Name": "svcBadIPv6",
+				"ListenPort": "8080",
+				"ListenAddresses": ["::1", "invalid::address"],
+				"Command": "/bin/echo"
+			}
+		]
+	}`)
+	checkExpectedErrorMessages(t, err, []string{
+		"service \"svcBadIPv6\" has invalid ListenAddress \"invalid::address\"",
+		"invalid IP address",
+	})
+}
+
+func TestInvalidListenAddressesNonIP(t *testing.T) {
+	t.Parallel()
+	_, err := loadConfigFromString(t, `{
+		"ResourcesAvailable": { "RAM": 10000 },
+		"Services": [
+			{
+				"Name": "svcNonIP",
+				"ListenPort": "8080",
+				"ListenAddresses": ["localhost", "127.0.0.1"],
+				"Command": "/bin/echo"
+			}
+		]
+	}`)
+	checkExpectedErrorMessages(t, err, []string{
+		"service \"svcNonIP\" has invalid ListenAddress \"localhost\"",
+		"invalid IP address",
+	})
+}
+
+func TestValidOpenAiApiListenAddresses(t *testing.T) {
+	t.Parallel()
+	_, err := loadConfigFromString(t, `{
+		"ResourcesAvailable": { "RAM": 10000 },
+		"OpenAiApi": {
+			"ListenPort": "7070",
+			"ListenAddresses": ["127.0.0.1", "::1"]
+		},
+		"Services": [
+			{
+				"Name": "testService",
+				"ListenPort": "8080",
+				"Command": "/bin/echo"
+			}
+		]
+	}`)
+	if err != nil {
+		t.Fatalf("did not expect an error but got: %v", err)
+	}
+}
+
+func TestValidManagementApiListenAddresses(t *testing.T) {
+	t.Parallel()
+	_, err := loadConfigFromString(t, `{
+		"ResourcesAvailable": { "RAM": 10000 },
+		"ManagementApi": {
+			"ListenPort": "7070",
+			"ListenAddresses": ["192.168.1.100", "fe80::1"]
+		},
+		"Services": [
+			{
+				"Name": "testService",
+				"ListenPort": "8080",
+				"Command": "/bin/echo"
+			}
+		]
+	}`)
+	if err != nil {
+		t.Fatalf("did not expect an error but got: %v", err)
+	}
+}
+
+func TestInvalidOpenAiApiListenAddresses(t *testing.T) {
+	t.Parallel()
+	_, err := loadConfigFromString(t, `{
+		"ResourcesAvailable": { "RAM": 10000 },
+		"OpenAiApi": {
+			"ListenPort": "7070",
+			"ListenAddresses": ["invalid.address"]
+		},
+		"Services": [
+			{
+				"Name": "testService",
+				"ListenPort": "8080",
+				"Command": "/bin/echo"
+			}
+		]
+	}`)
+	checkExpectedErrorMessages(t, err, []string{
+		"OpenAiApi has invalid ListenAddress \"invalid.address\"",
+		"invalid IP address",
+	})
+}
+
+func TestInvalidManagementApiListenAddresses(t *testing.T) {
+	t.Parallel()
+	_, err := loadConfigFromString(t, `{
+		"ResourcesAvailable": { "RAM": 10000 },
+		"ManagementApi": {
+			"ListenPort": "7070",
+			"ListenAddresses": ["256.256.256.256"]
+		},
+		"Services": [
+			{
+				"Name": "testService",
+				"ListenPort": "8080",
+				"Command": "/bin/echo"
+			}
+		]
+	}`)
+	checkExpectedErrorMessages(t, err, []string{
+		"ManagementApi has invalid ListenAddress \"256.256.256.256\"",
+		"invalid IP address",
+	})
+}
+
+func TestBackwardCompatibilityNoListenAddresses(t *testing.T) {
+	t.Parallel()
+	_, err := loadConfigFromString(t, `{
+		"ResourcesAvailable": { "RAM": 10000 },
+		"OpenAiApi": {
+			"ListenPort": "7070"
+		},
+		"ManagementApi": {
+			"ListenPort": "7071"
+		},
+		"Services": [
+			{
+				"Name": "testService",
+				"ListenPort": "8080",
+				"Command": "/bin/echo"
+			}
+		]
+	}`)
+	if err != nil {
+		t.Fatalf("did not expect an error but got: %v", err)
+	}
+}

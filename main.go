@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -299,15 +300,101 @@ func startOpenAiApi(OpenAiApi OpenAiApi, services []ServiceConfig) {
 		},
 	}
 
-	ln, err := net.Listen("tcp", server.Addr)
-	if err != nil {
-		log.Fatalf("[LLM API Server] Could not listen on %s: %v", server.Addr, err)
+	listenAddresses := OpenAiApi.GetListenAddresses()
+	listeners := make([]net.Listener, 0)
+	
+	// Create listeners for specified addresses or all interfaces
+	if listenAddresses == nil {
+		// Listen on all interfaces (original behavior)
+		ln, err := net.Listen("tcp", server.Addr)
+		if err != nil {
+			log.Fatalf("[LLM API Server] Could not listen on %s: %v", server.Addr, err)
+		}
+		listeners = append(listeners, &rawCaptureListener{Listener: ln})
+		log.Printf("[LLM API Server] Listening on all interfaces, port %s", OpenAiApi.ListenPort)
+	} else {
+		// Listen on specific addresses
+		for _, addr := range listenAddresses {
+			listenAddr := net.JoinHostPort(addr, OpenAiApi.ListenPort)
+			ln, err := net.Listen("tcp", listenAddr)
+			if err != nil {
+				log.Fatalf("[LLM API Server] Could not listen on %s: %v", listenAddr, err)
+			}
+			listeners = append(listeners, &rawCaptureListener{Listener: ln})
+			log.Printf("[LLM API Server] Listening on %s, port %s", addr, OpenAiApi.ListenPort)
+		}
 	}
-	wrappedLn := &rawCaptureListener{Listener: ln}
-
-	log.Printf("[LLM API Server] Listening on port %s", OpenAiApi.ListenPort)
-	if err := server.Serve(wrappedLn); err != nil {
-		log.Fatalf("Could not start LLM API server: %s\n", err.Error())
+	
+	// Handle cleanup of all listeners
+	defer func() {
+		for _, listener := range listeners {
+			_ = listener.Close()
+		}
+	}()
+	
+	// Accept connections from any of the listeners using goroutines
+	connectionChan := make(chan net.Conn)
+	errorChan := make(chan error)
+	
+	// Start a goroutine for each listener to accept connections
+	for _, listener := range listeners {
+		go func(l net.Listener) {
+			for {
+				if interrupted {
+					return
+				}
+				conn, err := l.Accept()
+				if err != nil {
+					errorChan <- err
+					return
+				}
+				connectionChan <- conn
+			}
+		}(listener)
+	}
+	
+	// Handle incoming connections and errors
+	for {
+		select {
+		case conn := <-connectionChan:
+			// Create a new request for each connection and serve it
+			go func(c net.Conn) {
+				defer c.Close()
+				
+				// Create a hijacker to handle the connection
+				if hj, ok := conn.(http.Hijacker); ok {
+					// For HTTP/1.1 connections, we can hijack them
+					netConn, _, err := hj.Hijack()
+					if err != nil {
+						log.Printf("[LLM API Server] Failed to hijack connection: %v", err)
+						return
+					}
+					defer netConn.Close()
+					
+					// Create a new request and response
+					req, err := http.ReadRequest(bufio.NewReader(netConn))
+					if err != nil {
+						log.Printf("[LLM API Server] Failed to read request: %v", err)
+						return
+					}
+					defer req.Body.Close()
+					
+					// Create a response writer that writes to the connection
+					resp := &responseWriter{conn: netConn}
+					
+					// Serve the request
+					server.Handler.ServeHTTP(resp, req)
+				} else {
+					// Fallback for non-hijackable connections
+					log.Printf("[LLM API Server] Connection cannot be hijacked, closing")
+					c.Close()
+				}
+			}(conn)
+		case err := <-errorChan:
+			if !interrupted {
+				log.Printf("[LLM API Server] Error accepting connection: %v", err)
+			}
+		}
 	}
 }
 
@@ -407,26 +494,70 @@ func signalToString(sig os.Signal) string {
 }
 
 func startProxy(serviceConfig ServiceConfig) {
-	listener, err := net.Listen("tcp", ":"+serviceConfig.ListenPort)
-	log.Printf("[%s] Listening on port %s", serviceConfig.Name, serviceConfig.ListenPort)
-	if err != nil {
-		log.Fatalf("[%s] Fatal error: cannot listen on port %s: %v", serviceConfig.Name, serviceConfig.ListenPort, err)
-	}
-	defer func(listener net.Listener) {
-		_ = listener.Close()
-	}(listener)
-
-	for {
-		if interrupted {
-			return
-		}
-		clientConnection, err := listener.Accept()
+	listenAddresses := serviceConfig.GetListenAddresses()
+	listeners := make([]net.Listener, 0)
+	
+	// Create listeners for specified addresses or all interfaces
+	if listenAddresses == nil {
+		// Listen on all interfaces (original behavior)
+		listener, err := net.Listen("tcp", ":"+serviceConfig.ListenPort)
 		if err != nil {
-			log.Printf("[%s] Error accepting connection: %v", serviceConfig.Name, err)
-			continue
+			log.Fatalf("[%s] Fatal error: cannot listen on port %s: %v", serviceConfig.Name, serviceConfig.ListenPort, err)
 		}
-		log.Printf("[%s] New client connection received %s", serviceConfig.Name, humanReadableConnection(clientConnection))
-		go handleConnection(clientConnection, serviceConfig, []byte{})
+		listeners = append(listeners, listener)
+		log.Printf("[%s] Listening on all interfaces, port %s", serviceConfig.Name, serviceConfig.ListenPort)
+	} else {
+		// Listen on specific addresses
+		for _, addr := range listenAddresses {
+			listenAddr := net.JoinHostPort(addr, serviceConfig.ListenPort)
+			listener, err := net.Listen("tcp", listenAddr)
+			if err != nil {
+				log.Fatalf("[%s] Fatal error: cannot listen on %s: %v", serviceConfig.Name, listenAddr, err)
+			}
+			listeners = append(listeners, listener)
+			log.Printf("[%s] Listening on %s, port %s", serviceConfig.Name, addr, serviceConfig.ListenPort)
+		}
+	}
+	
+	// Handle cleanup of all listeners
+	defer func() {
+		for _, listener := range listeners {
+			_ = listener.Close()
+		}
+	}()
+	
+	// Accept connections from any of the listeners using goroutines
+	connectionChan := make(chan net.Conn)
+	errorChan := make(chan error)
+	
+	// Start a goroutine for each listener to accept connections
+	for _, listener := range listeners {
+		go func(l net.Listener) {
+			for {
+				if interrupted {
+					return
+				}
+				conn, err := l.Accept()
+				if err != nil {
+					errorChan <- err
+					return
+				}
+				connectionChan <- conn
+			}
+		}(listener)
+	}
+	
+	// Handle incoming connections and errors
+	for {
+		select {
+		case conn := <-connectionChan:
+			log.Printf("[%s] New client connection received %s", serviceConfig.Name, humanReadableConnection(conn))
+			go handleConnection(conn, serviceConfig, []byte{})
+		case err := <-errorChan:
+			if !interrupted {
+				log.Printf("[%s] Error accepting connection: %v", serviceConfig.Name, err)
+			}
+		}
 	}
 }
 func humanReadableConnection(conn net.Conn) string {
@@ -1243,6 +1374,29 @@ func waitForProcessToTerminate(exitWaitGroup *sync.WaitGroup) bool {
 	case <-time.After(ProcessCheckTimeout):
 		return false
 	}
+}
+
+// responseWriter is a simple HTTP response writer that writes to a net.Conn
+type responseWriter struct {
+	conn net.Conn
+}
+
+func (rw *responseWriter) Header() http.Header {
+	return make(http.Header)
+}
+
+func (rw *responseWriter) Write(data []byte) (int, error) {
+	return rw.conn.Write(data)
+}
+
+func (rw *responseWriter) WriteHeader(statusCode int) {
+	// Write the status line
+	statusLine := fmt.Sprintf("HTTP/1.1 %d %s\r\n", statusCode, http.StatusText(statusCode))
+	rw.conn.Write([]byte(statusLine))
+	
+	// Write a minimal header
+	rw.conn.Write([]byte("Content-Length: 0\r\n"))
+	rw.conn.Write([]byte("\r\n"))
 }
 
 func copyAndHandleErrors(dst io.Writer, src io.Reader, logPrefix string) {
