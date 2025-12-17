@@ -320,7 +320,6 @@ func startOpenAiApi(OpenAiApi OpenAiApi, services []ServiceConfig) {
 	// Create a custom http.Server that uses ConnContext
 	// to attach the *rawCaptureConnection to each request's Context.
 	server := &http.Server{
-		Addr:    ":" + OpenAiApi.ListenPort,
 		Handler: mux,
 		// Whenever the server accepts a new net.Conn, this callback runs.
 		// If it's our rawCaptureConnection, store it in the request context.
@@ -332,16 +331,27 @@ func startOpenAiApi(OpenAiApi OpenAiApi, services []ServiceConfig) {
 		},
 	}
 
-	ln, err := net.Listen("tcp", server.Addr)
-	if err != nil {
-		log.Fatalf("[OpenAI API Server] Could not listen on %s: %v", server.Addr, err)
+	listenAddrs := resolveListenAddresses(OpenAiApi.ListenAddresses, OpenAiApi.ListenPort)
+	
+	// Start a goroutine for each listen address
+	var wg sync.WaitGroup
+	for _, addr := range listenAddrs {
+		wg.Add(1)
+		go func(address string) {
+			defer wg.Done()
+			ln, err := net.Listen("tcp", address)
+			if err != nil {
+				log.Fatalf("[OpenAI API Server] Could not listen on %s: %v", address, err)
+			}
+			wrappedLn := &rawCaptureListener{Listener: ln}
+			log.Printf("[OpenAI API Server] Listening on %s", address)
+			if err := server.Serve(wrappedLn); err != nil {
+				log.Fatalf("[OpenAI API Server] Could not start on %s: %s\n", address, err.Error())
+			}
+		}(addr)
 	}
-	wrappedLn := &rawCaptureListener{Listener: ln}
-
-	log.Printf("[OpenAI API Server] Listening on port %s", OpenAiApi.ListenPort)
-	if err := server.Serve(wrappedLn); err != nil {
-		log.Fatalf("Could not start OpenAI API Server: %s\n", err.Error())
-	}
+	
+	wg.Wait()
 }
 func printRequestUrl(request *http.Request) {
 	log.Printf("[OpenAI API Server] %s %s", request.Method, request.URL)
@@ -443,26 +453,52 @@ func signalToString(sig os.Signal) string {
 }
 
 func startProxy(serviceConfig ServiceConfig) {
-	listener, err := net.Listen("tcp", ":"+serviceConfig.ListenPort)
-	log.Printf("[%s] Listening on port %s", serviceConfig.Name, serviceConfig.ListenPort)
-	if err != nil {
-		log.Fatalf("[%s] Fatal error: cannot listen on port %s: %v", serviceConfig.Name, serviceConfig.ListenPort, err)
+	listenAddrs := resolveListenAddresses(serviceConfig.ListenAddresses, serviceConfig.ListenPort)
+	
+	// Create a channel to collect accept errors
+	acceptChan := make(chan net.Conn)
+	errorChan := make(chan error)
+	
+	// Start a listener for each address
+	for _, addr := range listenAddrs {
+		listener, err := net.Listen("tcp", addr)
+		if err != nil {
+			log.Fatalf("[%s] Fatal error: cannot listen on %s: %v", serviceConfig.Name, addr, err)
+		}
+		log.Printf("[%s] Listening on %s", serviceConfig.Name, addr)
+		
+		// Start accepting connections on this listener
+		go func(l net.Listener, address string) {
+			defer l.Close()
+			for {
+				if interrupted {
+					return
+				}
+				clientConnection, err := l.Accept()
+				if err != nil {
+					if !interrupted {
+						errorChan <- fmt.Errorf("[%s] Error accepting connection on %s: %v", serviceConfig.Name, address, err)
+					}
+					continue
+				}
+				acceptChan <- clientConnection
+			}
+		}(listener, addr)
 	}
-	defer func(listener net.Listener) {
-		_ = listener.Close()
-	}(listener)
-
+	
+	// Handle incoming connections from all listeners
 	for {
+		select {
+		case clientConnection := <-acceptChan:
+			log.Printf("[%s] New client connection received %s", serviceConfig.Name, humanReadableConnection(clientConnection))
+			go handleConnection(clientConnection, serviceConfig, []byte{})
+		case err := <-errorChan:
+			log.Printf("%v", err)
+		}
+		
 		if interrupted {
 			return
 		}
-		clientConnection, err := listener.Accept()
-		if err != nil {
-			log.Printf("[%s] Error accepting connection: %v", serviceConfig.Name, err)
-			continue
-		}
-		log.Printf("[%s] New client connection received %s", serviceConfig.Name, humanReadableConnection(clientConnection))
-		go handleConnection(clientConnection, serviceConfig, []byte{})
 	}
 }
 func humanReadableConnection(conn net.Conn) string {

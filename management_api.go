@@ -5,7 +5,9 @@ import (
 	_ "embed"
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -139,13 +141,29 @@ func startManagementApi(managementAPI ManagementApi, services []ServiceConfig) {
 			log.Printf("[Management API] Incomplete index page written: %s\n", err.Error())
 		}
 	})
+	
 	server := &http.Server{
-		Addr:    ":" + managementAPI.ListenPort,
 		Handler: mux,
 	}
 
-	log.Printf("[Management API] Listening on port %s", managementAPI.ListenPort)
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("[Management API] Could not start management API: %s\n", err.Error())
+	listenAddrs := resolveListenAddresses(managementAPI.ListenAddresses, managementAPI.ListenPort)
+	
+	// Start a goroutine for each listen address
+	var wg sync.WaitGroup
+	for _, addr := range listenAddrs {
+		wg.Add(1)
+		go func(address string) {
+			defer wg.Done()
+			listener, err := net.Listen("tcp", address)
+			if err != nil {
+				log.Fatalf("[Management API] Could not listen on %s: %v", address, err)
+			}
+			log.Printf("[Management API] Listening on %s", address)
+			if err := server.Serve(listener); err != nil {
+				log.Fatalf("[Management API] Could not start on %s: %s\n", address, err.Error())
+			}
+		}(addr)
 	}
+	
+	wg.Wait()
 }

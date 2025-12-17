@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"github.com/tidwall/jsonc"
 	"io"
+	"net"
 	"os"
 	"strconv"
+	"strings"
 	"text/template"
 )
 
@@ -92,6 +94,7 @@ type Config struct {
 type ServiceConfig struct {
 	Name                            string
 	ListenPort                      string
+	ListenAddresses                 []string
 	ProxyTargetHost                 string
 	ProxyTargetPort                 string
 	Command                         string
@@ -171,10 +174,12 @@ func (sc *ServiceConfig) GetServiceUrlTemplate(defaultUrl *string) (*template.Te
 }
 
 type OpenAiApi struct {
-	ListenPort string
+	ListenPort      string
+	ListenAddresses []string
 }
 type ManagementApi struct {
-	ListenPort string
+	ListenPort      string
+	ListenAddresses []string
 }
 
 func loadConfig(filePath string) (Config, error) {
@@ -348,6 +353,33 @@ func validateConfig(cfg Config) error {
 		}
 	}
 
+	// Validate ListenAddresses for services
+	for i, svc := range cfg.Services {
+		nameOrIndex := serviceNameOrIndex(svc.Name, i)
+		for _, addr := range svc.ListenAddresses {
+			if err := validateListenAddress(addr); err != nil {
+				issues = append(issues,
+					fmt.Sprintf("service %s has invalid ListenAddress %q: %v", nameOrIndex, addr, err))
+			}
+		}
+	}
+
+	// Validate ListenAddresses for OpenAiApi
+	for _, addr := range cfg.OpenAiApi.ListenAddresses {
+		if err := validateListenAddress(addr); err != nil {
+			issues = append(issues,
+				fmt.Sprintf("OpenAiApi has invalid ListenAddress %q: %v", addr, err))
+		}
+	}
+
+	// Validate ListenAddresses for ManagementApi
+	for _, addr := range cfg.ManagementApi.ListenAddresses {
+		if err := validateListenAddress(addr); err != nil {
+			issues = append(issues,
+				fmt.Sprintf("ManagementApi has invalid ListenAddress %q: %v", addr, err))
+		}
+	}
+
 	if len(issues) > 0 {
 		return errors.New(" - " + joinStrings(issues, "\n - "))
 	}
@@ -377,4 +409,46 @@ func joinStrings(ss []string, sep string) string {
 		out += sep + s
 	}
 	return out
+}
+
+// validateListenAddress validates that the given string is a valid IPv4 or IPv6 address
+func validateListenAddress(addr string) error {
+	// Remove brackets if present (IPv6 format)
+	addr = strings.Trim(addr, "[]")
+	
+	// Try to parse as IP address
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return fmt.Errorf("invalid IP address format")
+	}
+	
+	return nil
+}
+
+// resolveListenAddresses returns the list of address:port strings to listen on.
+// If ListenAddresses is empty, returns [":port"] for backward compatibility.
+// Otherwise, returns each address combined with the port.
+func resolveListenAddresses(listenAddresses []string, listenPort string) []string {
+	if len(listenAddresses) == 0 {
+		// Backward compatibility: bind to all interfaces
+		return []string{":" + listenPort}
+	}
+	
+	result := make([]string, 0, len(listenAddresses))
+	for _, addr := range listenAddresses {
+		// Remove brackets if present
+		addr = strings.Trim(addr, "[]")
+		
+		// Check if it's an IPv6 address
+		ip := net.ParseIP(addr)
+		if ip != nil && ip.To4() == nil {
+			// IPv6 address - needs brackets for net.Listen
+			result = append(result, "["+addr+"]:"+listenPort)
+		} else {
+			// IPv4 address
+			result = append(result, addr+":"+listenPort)
+		}
+	}
+	
+	return result
 }
