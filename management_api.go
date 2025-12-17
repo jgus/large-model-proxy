@@ -146,10 +146,10 @@ func startManagementApi(managementAPI ManagementApi, services []ServiceConfig) {
 		Handler: mux,
 	}
 
+	// Create listeners for specified addresses or all interfaces
 	listenAddresses := managementAPI.GetListenAddresses()
 	listeners := make([]net.Listener, 0)
 	
-	// Create listeners for specified addresses or all interfaces
 	if listenAddresses == nil {
 		// Listen on all interfaces (original behavior)
 		ln, err := net.Listen("tcp", server.Addr)
@@ -170,76 +170,50 @@ func startManagementApi(managementAPI ManagementApi, services []ServiceConfig) {
 			log.Printf("[Management API] Listening on %s, port %s", addr, managementAPI.ListenPort)
 		}
 	}
-	
-	// Handle cleanup of all listeners
-	defer func() {
-		for _, listener := range listeners {
-			_ = listener.Close()
-		}
-	}()
-	
-	// Accept connections from any of the listeners using goroutines
-	connectionChan := make(chan net.Conn)
-	errorChan := make(chan error)
-	
-	// Start a goroutine for each listener to accept connections
-	for _, listener := range listeners {
-		go func(l net.Listener) {
-			for {
-				if interrupted {
-					return
-				}
-				conn, err := l.Accept()
-				if err != nil {
-					errorChan <- err
-					return
-				}
-				connectionChan <- conn
-			}
-		}(listener)
+
+	// Create a custom handler that wraps the HTTP handler for Management API
+	handler := &managementApiHandler{
+		server:    server,
+		listeners: listeners,
 	}
+	startMultiListenerServerWithListeners("[Management API]", listeners, handler)
+}
+
+// managementApiHandler handles HTTP connections for Management API
+type managementApiHandler struct {
+	server    *http.Server
+	listeners []net.Listener
+}
+
+func (h *managementApiHandler) HandleConnection(conn net.Conn) {
+	defer conn.Close()
 	
-	// Handle incoming connections and errors
-	for {
-		select {
-		case conn := <-connectionChan:
-			// Create a new request for each connection and serve it
-			go func(c net.Conn) {
-				defer c.Close()
-				
-				// Create a hijacker to handle the connection
-				if hj, ok := conn.(http.Hijacker); ok {
-					// For HTTP/1.1 connections, we can hijack them
-					netConn, _, err := hj.Hijack()
-					if err != nil {
-						log.Printf("[Management API] Failed to hijack connection: %v", err)
-						return
-					}
-					defer netConn.Close()
-					
-					// Create a new request and response
-					req, err := http.ReadRequest(bufio.NewReader(netConn))
-					if err != nil {
-						log.Printf("[Management API] Failed to read request: %v", err)
-						return
-					}
-					defer req.Body.Close()
-					
-					// Create a response writer that writes to the connection
-					resp := &responseWriter{conn: netConn}
-					
-					// Serve the request
-					server.Handler.ServeHTTP(resp, req)
-				} else {
-					// Fallback for non-hijackable connections
-					log.Printf("[Management API] Connection cannot be hijacked, closing")
-					c.Close()
-				}
-			}(conn)
-		case err := <-errorChan:
-			if !interrupted {
-				log.Printf("[Management API] Error accepting connection: %v", err)
-			}
+	// Create a hijacker to handle the connection
+	if hj, ok := conn.(http.Hijacker); ok {
+		// For HTTP/1.1 connections, we can hijack them
+		netConn, _, err := hj.Hijack()
+		if err != nil {
+			log.Printf("[Management API] Failed to hijack connection: %v", err)
+			return
 		}
+		defer netConn.Close()
+		
+		// Create a new request and response
+		req, err := http.ReadRequest(bufio.NewReader(netConn))
+		if err != nil {
+			log.Printf("[Management API] Failed to read request: %v", err)
+			return
+		}
+		defer req.Body.Close()
+		
+		// Create a response writer that writes to the connection
+		resp := &responseWriter{conn: netConn}
+		
+		// Serve the request
+		h.server.Handler.ServeHTTP(resp, req)
+	} else {
+		// Fallback for non-hijackable connections
+		log.Printf("[Management API] Connection cannot be hijacked, closing")
+		conn.Close()
 	}
 }
