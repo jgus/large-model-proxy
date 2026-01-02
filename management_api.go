@@ -56,7 +56,7 @@ func handleStatus(responseWriter http.ResponseWriter, request *http.Request, ser
 	// Initialize resource usage tracking
 	for resource := range config.ResourcesAvailable {
 		response.Resources[resource] = ResourceUsage{
-			TotalAvailable: config.ResourcesAvailable[resource],
+			TotalAvailable: *resourceManager.resourcesAvailable[resource],
 			TotalInUse:     resourceManager.resourcesInUse[resource],
 			UsageByService: make(map[string]int),
 		}
@@ -121,12 +121,13 @@ var uiIndexContents []byte
 func startManagementApi(managementAPI ManagementApi, services []ServiceConfig) {
 	mux := http.NewServeMux()
 
-	// Add status endpoint
 	mux.HandleFunc("/status", func(responseWriter http.ResponseWriter, request *http.Request) {
+		printRequestUrlManagementApi(request)
 		handleStatus(responseWriter, request, services)
 	})
 
 	mux.HandleFunc("/", func(responseWriter http.ResponseWriter, request *http.Request) {
+		printRequestUrlManagementApi(request)
 		if request.URL.Path != "/" {
 			http.NotFound(responseWriter, request)
 			return
@@ -166,4 +167,7 @@ func startManagementApi(managementAPI ManagementApi, services []ServiceConfig) {
 	}
 	
 	wg.Wait()
+}
+func printRequestUrlManagementApi(request *http.Request) {
+	log.Printf("[Management API] %s %s", request.Method, request.URL)
 }

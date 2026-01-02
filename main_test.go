@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/stretchr/testify/assert"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func testImplConnectOnly(test *testing.T, proxyAddress string) {
@@ -912,7 +913,7 @@ func TestAppScenarios(test *testing.T) {
 			Name: "no-resource-requirements",
 			GetConfig: func(t *testing.T, testName string) Config {
 				return Config{
-					ResourcesAvailable: map[string]int{"VRAM": 20},
+					ResourcesAvailable: map[string]ResourceAvailable{"VRAM": {Amount: 20}},
 					Services: []ServiceConfig{
 						{
 							ListenPort:           "2032",
@@ -1052,7 +1053,7 @@ func TestAppScenarios(test *testing.T) {
 			GetConfig: func(t *testing.T, testName string) Config {
 				timeoutMs := uint(2000)
 				return Config{
-					ResourcesAvailable: map[string]int{"CPU": 1},
+					ResourcesAvailable: map[string]ResourceAvailable{"CPU": {Amount: 1}},
 					ManagementApi: ManagementApi{
 						ListenPort: "2065",
 					},
@@ -1129,7 +1130,7 @@ func TestAppScenarios(test *testing.T) {
 			GetConfig: func(t *testing.T, testName string) Config {
 				return Config{
 					ShutDownAfterInactivitySeconds: 3,
-					ResourcesAvailable:             map[string]int{"RAM": 1},
+					ResourcesAvailable:             map[string]ResourceAvailable{"RAM": {Amount: 1}},
 					Services: []ServiceConfig{
 						{
 							ListenPort:           "2008",
@@ -1159,7 +1160,7 @@ func TestAppScenarios(test *testing.T) {
 			Name: "client-close-full",
 			GetConfig: func(t *testing.T, testName string) Config {
 				return Config{
-					ResourcesAvailable: map[string]int{"VRAM": 1},
+					ResourcesAvailable: map[string]ResourceAvailable{"VRAM": {Amount: 1}},
 					Services: []ServiceConfig{
 						{
 							ListenPort:           "2030",
@@ -1373,7 +1374,6 @@ func TestAppScenarios(test *testing.T) {
 				testOpenAiApiModelsByID(t, "http://localhost:2071", expectedModelIDs, missingModelIDs)
 			},
 		},
-
 		{
 			Name: "args-with-whitespace",
 			GetConfig: func(t *testing.T, testName string) Config {
@@ -1446,8 +1446,8 @@ func TestAppScenarios(test *testing.T) {
 			Name: "dying-processes",
 			GetConfig: func(t *testing.T, testName string) Config {
 				return Config{
-					ResourcesAvailable: map[string]int{
-						"CPU": 1,
+					ResourcesAvailable: map[string]ResourceAvailable{
+						"CPU": {Amount: 1},
 					},
 					ManagementApi: ManagementApi{
 						ListenPort: "2035",
@@ -1499,8 +1499,8 @@ func TestAppScenarios(test *testing.T) {
 			Name: "failed-to-start-process-exit-immediately",
 			GetConfig: func(t *testing.T, testName string) Config {
 				return Config{
-					ResourcesAvailable: map[string]int{
-						"CPU": 1,
+					ResourcesAvailable: map[string]ResourceAvailable{
+						"CPU": {Amount: 1},
 					},
 					ManagementApi: ManagementApi{
 						ListenPort: "2067",
@@ -1535,8 +1535,8 @@ func TestAppScenarios(test *testing.T) {
 			Name: "failed-to-start-process-exit-after-sleep",
 			GetConfig: func(t *testing.T, testName string) Config {
 				return Config{
-					ResourcesAvailable: map[string]int{
-						"CPU": 1,
+					ResourcesAvailable: map[string]ResourceAvailable{
+						"CPU": {Amount: 1},
 					},
 					ManagementApi: ManagementApi{
 						ListenPort: "2069",
@@ -1572,8 +1572,8 @@ func TestAppScenarios(test *testing.T) {
 			GetConfig: func(t *testing.T, testName string) Config {
 				monitorProcessStatus := false
 				return Config{
-					ResourcesAvailable: map[string]int{
-						"CPU": 1,
+					ResourcesAvailable: map[string]ResourceAvailable{
+						"CPU": {Amount: 1},
 					},
 					ManagementApi: ManagementApi{
 						ListenPort: "2046",
@@ -1768,7 +1768,7 @@ func TestAppScenarios(test *testing.T) {
 			GetConfig: func(t *testing.T, testName string) Config {
 				timeoutMs := uint(3000)
 				return Config{
-					ResourcesAvailable: map[string]int{"CPU": 2},
+					ResourcesAvailable: map[string]ResourceAvailable{"CPU": {Amount: 2}},
 					ManagementApi:      ManagementApi{ListenPort: "2063"},
 					Services: []ServiceConfig{
 						{
@@ -1813,6 +1813,70 @@ func TestAppScenarios(test *testing.T) {
 					"localhost:2066",
 					"localhost:2063",
 				)
+			},
+		},
+		{
+			Name: "resource-check-command",
+			TestFunc: func(t *testing.T) {
+				testResourceCheckCommand(
+					t,
+					"localhost:2077",
+					"localhost:2079",
+					"localhost:2080",
+					"localhost:2081",
+					"resource-check-command_service0",
+					"resource-check-command_service1",
+					"localhost:2076",
+					"TestResource",
+				)
+			},
+			GetConfig: func(t *testing.T, testName string) Config {
+				return Config{
+					ResourcesAvailable: map[string]ResourceAvailable{
+						"TestResource": {
+							//this command increments a number in the file by one every time it runs
+							CheckCommand:              "read -r original_integer < test-logs/resource-check-command.counter.txt; incremented_integer=$((original_integer + 1)); printf '%d\n' \"$incremented_integer\" | tee test-logs/resource-check-command.counter.txt",
+							CheckIntervalMilliseconds: 1000,
+						},
+					},
+					LogLevel: LogLevelDebug,
+					ManagementApi: ManagementApi{
+						ListenPort: "2076",
+					},
+					Services: []ServiceConfig{
+						{
+							ListenPort:           "2077",
+							ProxyTargetHost:      "localhost",
+							ProxyTargetPort:      "12077",
+							Command:              "./test-server/test-server",
+							Args:                 "-p 12077 -healthcheck-port 2080 -sleep-before-listening 10s",
+							ResourceRequirements: map[string]int{"TestResource": 4},
+						},
+						{
+							ListenPort:           "2079",
+							ProxyTargetHost:      "localhost",
+							ProxyTargetPort:      "12079",
+							Command:              "./test-server/test-server",
+							Args:                 "-p 12079 -healthcheck-port 2081",
+							ResourceRequirements: map[string]int{"TestResource": 5},
+						},
+					},
+				}
+			},
+			AddressesToCheckAfterStopping: []string{
+				"localhost:2076",
+				"localhost:2077",
+				"localhost:2079",
+				"localhost:2080",
+				"localhost:2081",
+				"localhost:12077",
+				"localhost:12079",
+			},
+			SetupFunc: func(t *testing.T) {
+				err := os.Remove("test-logs/resource-check-command.counter.txt")
+				if err != nil && !os.IsNotExist(err) {
+					t.Fatalf("Failed to remove test-logs/resource-check-command.counter.txt: %v", err)
+				}
 			},
 		},
 	}
